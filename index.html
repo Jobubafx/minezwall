@@ -715,10 +715,9 @@
                 </div>
                 <div class="input-group">
                     <label for="withdrawMethod">Withdrawal Method</label>
-                    <select id="withdrawMethod">
-                        <option value="usdt">USDT (Polygon Network)</option>
-                        <option value="btc">Bitcoin</option>
-                        <option value="eth">Ethereum</option>
+                    <select id="withdrawMethod" onchange="updateWithdrawalMinimum()">
+                        <option value="usdt_polygon">USDT (Polygon Network) - Min $5</option>
+                        <option value="usdt_bep20">USDT (BEP20) - Min $10</option>
                     </select>
                 </div>
                 <div class="input-group">
@@ -1033,6 +1032,24 @@
             } catch (error) {
                 console.error('Update error:', error);
                 // Don't throw - just log the error but don't disrupt gameplay
+            }
+        }
+
+        function updateWithdrawalMinimum() {
+            const method = document.getElementById('withdrawMethod').value;
+            const amountInput = document.getElementById('withdrawAmount');
+            
+            if (method === 'usdt_polygon') {
+                amountInput.min = 5;
+                amountInput.placeholder = 'Minimum $5.00';
+            } else if (method === 'usdt_bep20') {
+                amountInput.min = 10;
+                amountInput.placeholder = 'Minimum $10.00';
+            }
+            
+            // Reset the input value if it's below the new minimum
+            if (parseFloat(amountInput.value) < parseFloat(amountInput.min)) {
+                amountInput.value = '';
             }
         }
 
@@ -1415,8 +1432,14 @@
             const method = document.getElementById('withdrawMethod').value;
             const walletAddress = document.getElementById('walletAddress').value;
 
-            if (!name || isNaN(amount) || amount < 5 || amount > gameState.usd || !walletAddress) {
-                alert('Invalid withdrawal details');
+            // Set minimum amounts based on method
+            let minAmount = 5;
+            if (method === 'usdt_bep20') {
+                minAmount = 10;
+            }
+
+            if (!name || isNaN(amount) || amount < minAmount || amount > gameState.usd || !walletAddress) {
+                alert(`Invalid withdrawal details. Minimum amount for ${method === 'usdt_polygon' ? 'Polygon Network' : 'BEP20'} is $${minAmount}.`);
                 return;
             }
 
