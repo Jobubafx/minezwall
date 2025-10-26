@@ -902,9 +902,11 @@
         const ADMIN_ID = 1558798885;
         const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyxwsSm4zulQ0hgPYUfScuqcDmx4nZHoXwa0s9CQuzcJKnASBRACTykUMQfx-uMQAhv/exec';
         
-        const gameState = {
+        // Load game state from localStorage first to prevent reset
+        const savedState = localStorage.getItem('minezwall_gameState');
+        const gameState = savedState ? JSON.parse(savedState) : {
             coins: 500,
-            usd: 0.500,
+            usd: 0.000,
             level: 1,
             diamondsFound: 0,
             diamondsToFind: 4,
@@ -922,11 +924,34 @@
             channelJoined: false,
             referralCode: '',
             referredBy: '',
-            verificationAttempts: 0
+            verificationAttempts: 0,
+            lastServerSync: null
         };
+
+        // Function to save game state to localStorage
+        function saveGameStateToLocal() {
+            localStorage.setItem('minezwall_gameState', JSON.stringify(gameState));
+        }
+
+        // Function to load game state from localStorage
+        function loadGameStateFromLocal() {
+            const saved = localStorage.getItem('minezwall_gameState');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                // Merge with current state, preserving current session
+                Object.keys(parsed).forEach(key => {
+                    if (gameState[key] !== undefined) {
+                        gameState[key] = parsed[key];
+                    }
+                });
+            }
+        }
 
         // Initialize the game
         async function init() {
+            // Load from localStorage first to ensure we have the latest state
+            loadGameStateFromLocal();
+            
             tg.expand();
             
             if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
@@ -934,9 +959,16 @@
                 gameState.userId = user.id;
                 gameState.fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
                 gameState.username = user.username || `User${user.id}`;
-                document.getElementById('userDisplay').textContent = `Welcome, ${gameState.fullName || gameState.username}!`;
-                document.getElementById('withdrawName').value = gameState.fullName || '';
+                
+                // Only update display if we don't have existing user data
+                if (!localStorage.getItem('minezwall_gameState')) {
+                    document.getElementById('userDisplay').textContent = `Welcome, ${gameState.fullName || gameState.username}!`;
+                    document.getElementById('withdrawName').value = gameState.fullName || '';
+                }
             }
+
+            // Update UI with current state
+            updateUI();
 
             // Check if admin and add admin menu
             if (gameState.userId === ADMIN_ID) {
@@ -946,6 +978,7 @@
                 document.getElementById('dropdownContent').appendChild(adminButton);
             }
 
+            // Try to sync with server, but don't reset if it fails
             await loadGameStateFromServer();
             setupEventListeners();
 
@@ -956,7 +989,7 @@
             }
 
             // Handle referral if present
-            if (tg.initDataUnsafe.start_param) {
+            if (tg.initDataUnsafe && tg.initDataUnsafe.start_param) {
                 gameState.referredBy = tg.initDataUnsafe.start_param;
                 await registerReferral();
             }
@@ -964,73 +997,107 @@
             startBackgroundMusic();
             showInAppAd();
             setInterval(showPeriodicAd, 600000);
+            
+            // Auto-save to localStorage every 30 seconds
+            setInterval(saveGameStateToLocal, 30000);
         }
 
         async function loadGameStateFromServer() {
+            if (!gameState.userId) {
+                console.log('No user ID available, skipping server load');
+                return;
+            }
+
             try {
                 const response = await fetch(`${APPS_SCRIPT_URL}?action=getUserData&userId=${gameState.userId}`);
                 
                 if (!response.ok) {
-                    throw new Error('Network response was not ok');
+                    throw new Error(`Server responded with ${response.status}`);
                 }
                 
                 const data = await response.json();
                 
                 if (data.success && data.user) {
-                    // Only update specific properties to preserve current session state
-                    gameState.coins = data.user.coins || gameState.coins;
-                    gameState.usd = data.user.usd || gameState.usd;
-                    gameState.level = data.user.level || gameState.level;
-                    gameState.channelJoined = data.user.channelJoined || gameState.channelJoined;
-                    gameState.referralCode = data.user.referralCode || gameState.referralCode;
-                    gameState.referredBy = data.user.referredBy || gameState.referredBy;
+                    console.log('Server data loaded successfully:', data.user);
+                    
+                    // Only update if server data is more recent or we don't have local data
+                    const shouldUpdateFromServer = !gameState.lastServerSync || 
+                        (data.user.lastUpdate && new Date(data.user.lastUpdate) > new Date(gameState.lastServerSync));
+                    
+                    if (shouldUpdateFromServer) {
+                        // Preserve current game session but update balances from server
+                        const currentCoins = gameState.coins;
+                        const currentUsd = gameState.usd;
+                        const currentLevel = gameState.level;
+                        
+                        // Update from server
+                        gameState.coins = parseFloat(data.user.coins) || gameState.coins;
+                        gameState.usd = parseFloat(data.user.usd) || gameState.usd;
+                        gameState.level = parseInt(data.user.level) || gameState.level;
+                        gameState.channelJoined = data.user.channelJoined || gameState.channelJoined;
+                        gameState.referralCode = data.user.referralCode || gameState.referralCode;
+                        gameState.referredBy = data.user.referredBy || gameState.referredBy;
+                        gameState.lastServerSync = new Date().toISOString();
+                        
+                        console.log('Updated from server. Coins:', gameState.coins, 'USD:', gameState.usd, 'Level:', gameState.level);
+                    }
                     
                     updateUI();
+                    saveGameStateToLocal();
                 } else {
-                    // New user, register but don't reset existing state
+                    // User doesn't exist on server, register them
+                    console.log('User not found on server, registering...');
                     await registerUser();
                 }
             } catch (error) {
-                console.error('Load error:', error);
-                // Don't reset game state on error - keep current session data
-                // Only attempt to register if this is truly a new user
-                await registerUser();
+                console.error('Load from server error:', error);
+                // Don't reset anything - continue with local state
+                console.log('Continuing with local game state due to server error');
             }
         }
 
         async function registerUser() {
+            if (!gameState.userId) return;
+
             try {
-                const response = await fetch(`${APPS_SCRIPT_URL}?action=registerUser&userId=${gameState.userId}&username=${gameState.username}&fullName=${gameState.fullName}&coins=${gameState.coins}&usd=${gameState.usd}&channelJoined=${gameState.channelJoined}`);
+                const response = await fetch(`${APPS_SCRIPT_URL}?action=registerUser&userId=${gameState.userId}&username=${encodeURIComponent(gameState.username)}&fullName=${encodeURIComponent(gameState.fullName)}&coins=${gameState.coins}&usd=${gameState.usd}&channelJoined=${gameState.channelJoined}`);
                 
                 if (!response.ok) {
-                    throw new Error('Network response was not ok');
+                    throw new Error(`Server responded with ${response.status}`);
                 }
                 
                 const data = await response.json();
                 if (data.success) {
                     gameState.referralCode = data.referralCode;
+                    gameState.lastServerSync = new Date().toISOString();
+                    saveGameStateToLocal();
+                    console.log('User registered successfully with server');
                 }
             } catch (error) {
                 console.error('Register error:', error);
-                // Don't throw error - just log it and continue
+                // Don't throw error - user can continue playing offline
             }
         }
 
         async function updateServerState() {
+            if (!gameState.userId) return;
+
             try {
                 const response = await fetch(`${APPS_SCRIPT_URL}?action=updateUser&userId=${gameState.userId}&coins=${gameState.coins}&usd=${gameState.usd}&channelJoined=${gameState.channelJoined}&level=${gameState.level}`);
                 
                 if (!response.ok) {
-                    throw new Error('Network response was not ok');
+                    throw new Error(`Server responded with ${response.status}`);
                 }
                 
-                // Optional: verify update was successful
                 const data = await response.json();
-                if (!data.success) {
+                if (data.success) {
+                    gameState.lastServerSync = new Date().toISOString();
+                    console.log('Server state updated successfully');
+                } else {
                     console.warn('Server update may have failed');
                 }
             } catch (error) {
-                console.error('Update error:', error);
+                console.error('Update server error:', error);
                 // Don't throw - just log the error but don't disrupt gameplay
             }
         }
@@ -1065,6 +1132,7 @@
                 if (data.success && data.isMember) {
                     gameState.channelJoined = true;
                     await updateServerState();
+                    saveGameStateToLocal();
                     showPage('home');
                     alert('Verification successful! Welcome to Minezwall.');
                 } else {
@@ -1102,6 +1170,9 @@
             document.getElementById('difficultySelect').value = gameState.difficulty;
             document.getElementById('themeSelect').value = localStorage.getItem('theme') || 'dark';
             applyTheme();
+
+            // Save state before page unload
+            window.addEventListener('beforeunload', saveGameStateToLocal);
         }
 
         function showPage(pageId) {
@@ -1173,9 +1244,12 @@
         }
 
         function placeDiamonds() {
-            for (let i = 0; i < gameState.grid.length; i++) {
-                if (!gameState.grid[i].isMine) {
-                    gameState.grid[i].isDiamond = true;
+            let diamondsPlaced = 0;
+            while (diamondsPlaced < gameState.diamondsToFind) {
+                const randomIndex = Math.floor(Math.random() * 25);
+                if (!gameState.grid[randomIndex].isMine && !gameState.grid[randomIndex].isDiamond) {
+                    gameState.grid[randomIndex].isDiamond = true;
+                    diamondsPlaced++;
                 }
             }
         }
@@ -1213,6 +1287,7 @@
 
             updateUI();
             await updateServerState();
+            saveGameStateToLocal();
         }
 
         function gameOver() {
@@ -1241,13 +1316,15 @@
 
             gameState.gameActive = false;
             clearInterval(gameState.timerInterval);
-            gameState.coins -= 8;
+            gameState.coins -= 10;
             gameState.usd += 0.005;
             gameState.level++;
             playSound('win');
             document.getElementById('winModal').style.display = 'flex';
             showRewardedAd();
+            
             await updateServerState();
+            saveGameStateToLocal();
         }
 
         function nextLevel() {
@@ -1276,6 +1353,8 @@
             document.getElementById('usdDisplay').textContent = `$${gameState.usd.toFixed(3)}`;
             document.getElementById('withdrawUsdDisplay').textContent = `$${gameState.usd.toFixed(3)}`;
             document.getElementById('diamondsFound').textContent = `${gameState.diamondsFound}/${gameState.diamondsToFind}`;
+            document.getElementById('userDisplay').textContent = `Welcome, ${gameState.fullName || gameState.username}!`;
+            document.getElementById('withdrawName').value = gameState.fullName || '';
         }
 
         async function skipWithAd() {
@@ -1292,6 +1371,7 @@
                 closeModal('loseModal');
                 updateUI();
                 await updateServerState();
+                saveGameStateToLocal();
             } else {
                 alert('Not enough coins!');
             }
@@ -1302,6 +1382,7 @@
             gameState.level++;
             updateUI();
             await updateServerState();
+            saveGameStateToLocal();
             initGame();
         }
 
@@ -1310,6 +1391,7 @@
                 gameState.coins -= 5;
                 updateUI();
                 await updateServerState();
+                saveGameStateToLocal();
                 closeModal('loseModal');
                 initGame();
             } else {
@@ -1325,6 +1407,7 @@
                 gameState.coins += 50;
                 updateUI();
                 await updateServerState();
+                saveGameStateToLocal();
                 localStorage.setItem('dailyBonusLastClaimed', today);
                 document.getElementById('dailyBonusModal').style.display = 'flex';
             } else {
@@ -1355,10 +1438,12 @@
 
         function changeDifficulty() {
             gameState.difficulty = document.getElementById('difficultySelect').value;
+            saveGameStateToLocal();
         }
 
         function toggleSound() {
             gameState.soundEnabled = document.getElementById('soundToggle').checked;
+            saveGameStateToLocal();
         }
 
         function toggleMusic() {
@@ -1368,6 +1453,7 @@
             } else {
                 stopBackgroundMusic();
             }
+            saveGameStateToLocal();
         }
 
         function startBackgroundMusic() {
@@ -1394,10 +1480,10 @@
                 show_9662480({
                     type: 'inApp',
                     inAppSettings: {
-                        frequency: 3,
+                        frequency: 5,
                         capping: 0.3,
-                        interval: 60,
-                        timeout: 10,
+                        interval: 40,
+                        timeout: 20,
                         everyPage: true
                     }
                 });
@@ -1446,6 +1532,7 @@
             gameState.usd -= amount;
             updateUI();
             await updateServerState();
+            saveGameStateToLocal();
 
             const withdrawalDetails = {
                 name, amount, method, walletAddress, userId: gameState.userId, date: new Date().toISOString()
@@ -1479,6 +1566,7 @@
                     }
                     updateUI();
                     await updateServerState();
+                    saveGameStateToLocal();
                     alert(`Redeemed! Received ${data.value} ${data.type}`);
                 } else {
                     alert(data.message || 'Invalid code');
@@ -1580,6 +1668,7 @@
                     alert('Referral successful! You received 50 coins.');
                     updateUI();
                     await updateServerState();
+                    saveGameStateToLocal();
                 }
             } catch (error) {
                 console.error('Referral error:', error);
